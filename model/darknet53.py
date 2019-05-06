@@ -15,11 +15,30 @@ def darknet():
     """
     inputs = Input(shape=(416, 416, 3))
     x = darknet_base(input=inputs)
-    x = GlobalAveragePooling2D()(x)
-    x = Dense(1000, activation="softmax")(x)
+    # x = GlobalAveragePooling2D()(x)
+    # x = Dense(1000, activation="softmax")(x)
     model = Model(inputs, x)
     return model
 
+def make_last_lasyers(x, num_filters, out_filters):
+    """
+
+    :param x: input tensor
+    :param num_filters: 卷积核数
+    :param out_filters: 输出核数
+    :return: 返回 采集值
+    """
+
+    x = conv2d_unit(x=x, filters=num_filters, kernels=(1, 1))
+    x = conv2d_unit(x=x, filters=num_filters * 2, kernels=(3, 3))
+    x = conv2d_unit(x=x, filters=num_filters, kernels=(1, 1))
+    x = conv2d_unit(x=x, filters=num_filters * 2, kernels=(3, 3))
+    x = conv2d_unit(x=x, filters=num_filters, kernels=(1, 1))
+
+    y = conv2d_unit(x=x, filters=num_filters * 2, kernels=(3, 3))
+    y = conv2d_unit(x=y, filters=out_filters, kernels = (1, 1))
+
+    return  x, y
 
 def darknet_base(input):
     """
@@ -42,13 +61,13 @@ def darknet_base(input):
     x = stack_residual_block(x, 64, 2)
 
     # 3*3 256 卷积核 步长为2
-    x = conv2d_unit(x, 256, (3, 3), 2)
+    x = conv2d_unit(x, 256, (3, 3), strides=2)
 
     # 8 128 残差网络结构
     x = stack_residual_block(x, 128, 8)  # 52*52*256
 
     # 3 * 3 512 卷积核 步长为2
-    x = conv2d_unit(x, 512, 2)
+    x = conv2d_unit(x, 512, (3, 3), strides=2)
 
     # 8 256 残差网络结构
     x = stack_residual_block(x, 256, 8)
