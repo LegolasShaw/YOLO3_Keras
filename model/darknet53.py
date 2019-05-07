@@ -3,11 +3,11 @@
 # @datetime: 2019-05-06 15:37
 # @Name: darknet53.py
 
-from keras.layers import Input, add, GlobalAveragePooling2D, Dense
-from keras.layers import Conv2D, BatchNormalization, LeakyReLU, Activation
+from keras.layers import Input, add,Concatenate
+from keras.layers import Conv2D, BatchNormalization, LeakyReLU, Activation, UpSampling2D
 from keras.regularizers import l2
 from keras.models import Model
-
+import keras.backend as K
 
 def darknet():
     """
@@ -22,23 +22,20 @@ def darknet():
 
 def make_last_lasyers(x, num_filters, out_filters):
     """
-
     :param x: input tensor
     :param num_filters: 卷积核数
     :param out_filters: 输出核数
     :return: 返回 采集值
     """
-
     x = conv2d_unit(x=x, filters=num_filters, kernels=(1, 1))
     x = conv2d_unit(x=x, filters=num_filters * 2, kernels=(3, 3))
     x = conv2d_unit(x=x, filters=num_filters, kernels=(1, 1))
     x = conv2d_unit(x=x, filters=num_filters * 2, kernels=(3, 3))
     x = conv2d_unit(x=x, filters=num_filters, kernels=(1, 1))
-
     y = conv2d_unit(x=x, filters=num_filters * 2, kernels=(3, 3))
-    y = conv2d_unit(x=y, filters=out_filters, kernels = (1, 1))
+    y = conv2d_unit(x=y, filters=out_filters, kernels=(1, 1))
+    return x, y
 
-    return  x, y
 
 def darknet_base(input):
     """
@@ -96,7 +93,7 @@ def conv2d_unit(x, filters, kernels, strides = 1):
                activation='linear',
                kernel_regularizer=l2(5e-4))(x)
     x = BatchNormalization()(x)
-    x = LeakyReLU()(x)
+    x = LeakyReLU(alpha=0.1)(x)
     return x
 
 def stack_residual_block(input, filters, n=1):
@@ -106,8 +103,9 @@ def stack_residual_block(input, filters, n=1):
     :param n: 残差网络 结构 重复次数
     :return:
     """
+    x = input
     for i in range(n):
-        x = residual_block(input, filters)
+        x = residual_block(x, filters)
     return x
 
 
@@ -118,8 +116,4 @@ def residual_block(input, filters):
     x = Activation('linear')(x)
     return x
 
-
-if __name__ == "__main__":
-    model = darknet()
-    model.summary()
 
