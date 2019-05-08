@@ -155,12 +155,6 @@ def yolo_corrent_boxes(box_xy, box_wh, input_shape, image_shape):
     boxes *= K.concatenate([image_shape, image_shape])
     return boxes
 
-
-
-
-
-
-
 def yolo_head(feats, anchors, num_classes, input_shape, calc_loss=False):
     """Convert final layer features to bounding box parameters."""
     num_anchors = len(anchors)
@@ -205,11 +199,3 @@ if __name__ == "__main__":
 
     y = tf.boolean_mask(test, xx, axis=0)
     print(y.eval(session=tf_session))
-
-
-
-
-
-    # data = np.array([[[1, 2, ], [4, 5]],
-    #                  [[7, 8, ], [10, 11]]])
-    # print(data[..., ::-1])
