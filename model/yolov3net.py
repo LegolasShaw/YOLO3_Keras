@@ -182,6 +182,24 @@ def yolo_head(feats, anchors, num_classes, input_shape, calc_loss=False):
     return box_xy, box_wh, box_confidence, box_class_probs
 
 
+def yolo_loss(args, anchors, num_class, ignore_threshold=0.5, print_loss=False):
+    """
+
+    :param args:
+    :param anchors: 宽和高 数组
+    :param num_class: 类别数
+    :param ignore_threshold:  忽略值阀值
+    :param print_loss: 是否输出 loss
+    :return:
+    """
+    try:
+        num_layers = len(anchors)/3
+        yolo_outputs = args[:num_layers]
+        y_true = args[num_layers:]
+    except Exception as err:
+        print(err)
+
+
 if __name__ == "__main__":
     # inputs = Input(shape=(416, 416, 3))
     # model = yolo_body(inputs=inputs, num_anchors=3, num_classes=80)
