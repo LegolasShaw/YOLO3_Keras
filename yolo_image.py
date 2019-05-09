@@ -7,12 +7,28 @@ import os
 import numpy as np
 from keras.models import load_model
 import colorsys
-import keras.backend as K
+import keras.backend as k
 from model.yolov3net import yolo_eval
 from keras.utils import multi_gpu_model
 from timeit import default_timer as timer
 
-from PIL import Image
+from PIL import Image, ImageFont, ImageDraw
+
+
+def letterbox_image(image, size):
+    iw, ih = image.size
+    w, h = size
+
+    scale = min(w/iw, h/ih)
+
+    nw = int(scale * iw)
+    nh = int(scale * ih)
+
+    image = image.resize((nw, nh), Image.BICUBIC)
+    new_image = Image.new('RGB', size, (128, 128, 128))
+
+    new_image.paste(image, ((w-nw)/2, (h-nh)/2))
+    return new_image
 
 
 class YoloClass(object):
@@ -53,8 +69,8 @@ class YoloClass(object):
         self.__dict__.update(kwargs)
         self.class_names = self._get_class()
         self.anchors = self._get_anchors()
-        self.sess = K.get_session()
-        self.boxesm, self.scores, self.classes = self.self.generate()
+        self.sess = k.get_session()
+        self.boxes, self.scores, self.classes = self.generate()
 
     def generate(self):
         model_path = os.path.expanduser(self.model_path)
@@ -82,7 +98,7 @@ class YoloClass(object):
         np.random.shuffle(self.colors)
         np.random.seed(None)
 
-        self.input_image_shape = K.placeholder(shape=(2,))
+        self.input_image_shape = k.placeholder(shape=(2,))
 
         if self.gpu_num > 2:
             self.yolo_model = multi_gpu_model(self.yolo_model, self.gpu_num)
@@ -96,26 +112,66 @@ class YoloClass(object):
     def detect_image(self, image):
         start = timer()
 
+        if self.model_image_size != (None, None):
+            # 断言检测
+            assert self.model_image_size[0] % 32 == 0, 'Multiples of 32 required'
+            assert self.model_image_size[1] % 32 == 0, 'Multiples of 32 required'
+            boxed_image = letterbox_image(image, tuple(reversed(self.model_image_size)))
+        else:
+            new_image_size = (image.width - (image.width - image.width % 32),
+                              image.height - (image.height - image.height % 32))
 
+            boxed_image = letterbox_image(image, new_image_size)
+        image_data = np.array(boxed_image, dtype='float32')
 
-def letterbox_image(image, size):
-    iw, ih = image.size
-    w, h = size
+        image_data /= 255.0
+        image_data = np.expand_dims(image_data, 0)
+        out_boxes, out_scores, out_classes = self.sess.run([self.boxes, self.scores, self.classes],
+                                                           feed_dict={self.yolo_model.input: image_data,
+                                                                      self.input_image_shape: [image.size[1], image.size[0]],
+                                                                      k.learning_phase(): 0})
+        print('Found {} boxes for {}'.format(len(out_boxes), 'img'))
+        font = ImageFont.truetype(font='font/FiraMono-Medium.otf',
+                                  size=np.floor(3e-2 * image.size[1] + 0.5).astype('int32'))
 
-    scale = min(w/iw, h/ih)
+        thickness = (image.size[0] + image.size[1]) // 300
 
-    nw = int(scale * iw)
-    nh = int(scale * ih)
+        for i, c in reversed(list(enumerate(out_classes))):  # 输出对应类型及对应索引
+            predicted_class = self.class_names[c]  # 预测类型
+            box = out_boxes[i]  # 检验框
+            score = out_scores[i]  # 得分
 
-    image = image.resize((nw, nh), Image.BICUBIC)
-    new_image = Image.new('RGB', size, (128, 128))
+            label = '{} {:.2f}'.format(predicted_class, score)
+            draw = ImageDraw.Draw(image)
+            label_size = draw.textsize(label, font)
+            top, left, bottom, right = box
+            top = max(0, np.floor(top + 0.5).astype('int32'))
+            left = max(0, np.floor(left + 0.5).astype('int32'))
+            bottom = min(image.size[1], np.floor(bottom + 0.5).astype('int32'))
+            right = min(image.size[0], np.floor(right + 0.5).astype('int32'))
+            print(label, (left, top), (right, bottom))
+            if top - label_size[1] >= 0:
+                text_origin = np.array([left, top - label_size[1]])
+            else:
+                text_origin = np.array([left, top + 1])
 
-    new_image.paste(image, ((w-nw)/2, (h-nh)/2))
-    return new_image
+            for n in range(thickness):
+                draw.rectangle([left + n, top + n, right + n, bottom + n], outline=self.colors[c])
+            draw.rectangle(
+                [tuple(text_origin), tuple(text_origin + label_size)],
+                fill=self.colors[c])
+            draw.text(text_origin, label, fill=(0, 0, 0), font=font)
+        end = timer()
+        print(end - start)
+        return image
+
+    def close_seeion(self):
+        self.sess.close()
 
 
 if __name__ == "__main__":
-    input_image_shape = K.placeholder(shape=(2,))
-    print(input_image_shape)
+    out_classes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    for i, c in reversed(list(enumerate(out_classes))):
+        print(i, c)
 
 
