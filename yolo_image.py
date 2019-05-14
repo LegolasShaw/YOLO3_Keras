@@ -106,8 +106,7 @@ class YoloClass(object):
                                            num_class=num_classes, image_shape=self.input_image_shape,
                                            score_threshold=self.scores, iou_threshold=self.iou)
 
-
-        return  boxes, scores, classes
+        return boxes, scores, classes
 
     def detect_image(self, image):
         start = timer()

@@ -182,7 +182,7 @@ def yolo_head(feats, anchors, num_classes, input_shape, calc_loss=False):
     return box_xy, box_wh, box_confidence, box_class_probs
 
 
-def yolo_loss(args, anchors, num_class, ignore_threshold=0.5, print_loss=False):
+def yolo_loss(args, anchors, num_classes, ignore_threshold=0.5, print_loss=False):
     """
 
     :param args:
@@ -192,13 +192,169 @@ def yolo_loss(args, anchors, num_class, ignore_threshold=0.5, print_loss=False):
     :param print_loss: 是否输出 loss
     :return:
     """
-    try:
-        num_layers = len(anchors)/3
-        yolo_outputs = args[:num_layers]
-        y_true = args[num_layers:]
-    except Exception as err:
-        print(err)
+    num_layers = len(anchors) // 3  # default setting
+    yolo_outputs = args[:num_layers]
+    y_true = args[num_layers:]
+    anchor_mask = [[6, 7, 8], [3, 4, 5], [0, 1, 2]] if num_layers == 3 else [[3, 4, 5], [1, 2, 3]]
+    input_shape = K.cast(K.shape(yolo_outputs[0])[1:3] * 32, K.dtype(y_true[0]))
+    grid_shapes = [K.cast(K.shape(yolo_outputs[l])[1:3], K.dtype(y_true[0])) for l in range(num_layers)]
+    loss = 0
+    m = K.shape(yolo_outputs[0])[0]  # batch size, tensor
+    mf = K.cast(m, K.dtype(yolo_outputs[0]))
 
+    for l in range(num_layers):
+        object_mask = y_true[l][..., 4:5]
+        true_class_probs = y_true[l][..., 5:]
+
+        grid, raw_pred, pred_xy, pred_wh = yolo_head(yolo_outputs[l],
+                                                     anchors[anchor_mask[l]], num_classes, input_shape,
+                                                     calc_loss=True)
+        pred_box = K.concatenate([pred_xy, pred_wh])
+
+        # Darknet raw box to calculate loss.
+        raw_true_xy = y_true[l][..., :2] * grid_shapes[l][::-1] - grid
+        raw_true_wh = K.log(y_true[l][..., 2:4] / anchors[anchor_mask[l]] * input_shape[::-1])
+        raw_true_wh = K.switch(object_mask, raw_true_wh, K.zeros_like(raw_true_wh))  # avoid log(0)=-inf
+        box_loss_scale = 2 - y_true[l][..., 2:3] * y_true[l][..., 3:4]
+
+        # Find ignore mask, iterate over each of batch.
+        ignore_mask = tf.TensorArray(K.dtype(y_true[0]), size=1, dynamic_size=True)
+        object_mask_bool = K.cast(object_mask, 'bool')
+
+        def loop_body(b, ignore_mask):
+            true_box = tf.boolean_mask(y_true[l][b, ..., 0:4], object_mask_bool[b, ..., 0])
+            iou = box_iou(pred_box[b], true_box)
+            best_iou = K.max(iou, axis=-1)
+            ignore_mask = ignore_mask.write(b, K.cast(best_iou < ignore_threshold, K.dtype(true_box)))
+            return b + 1, ignore_mask
+
+        _, ignore_mask = K.control_flow_ops.while_loop(lambda b, *args: b < m, loop_body, [0, ignore_mask])
+        ignore_mask = ignore_mask.stack()
+        ignore_mask = K.expand_dims(ignore_mask, -1)
+
+        # K.binary_crossentropy is helpful to avoid exp overflow.
+        xy_loss = object_mask * box_loss_scale * K.binary_crossentropy(raw_true_xy, raw_pred[..., 0:2],
+                                                                       from_logits=True)
+        wh_loss = object_mask * box_loss_scale * 0.5 * K.square(raw_true_wh - raw_pred[..., 2:4])
+        confidence_loss = object_mask * K.binary_crossentropy(object_mask, raw_pred[..., 4:5], from_logits=True) + \
+                          (1 - object_mask) * K.binary_crossentropy(object_mask, raw_pred[..., 4:5],
+                                                                    from_logits=True) * ignore_mask
+        class_loss = object_mask * K.binary_crossentropy(true_class_probs, raw_pred[..., 5:], from_logits=True)
+
+        xy_loss = K.sum(xy_loss) / mf
+        wh_loss = K.sum(wh_loss) / mf
+        confidence_loss = K.sum(confidence_loss) / mf
+        class_loss = K.sum(class_loss) / mf
+        loss += xy_loss + wh_loss + confidence_loss + class_loss
+        if print_loss:
+            loss = tf.Print(loss, [loss, xy_loss, wh_loss, confidence_loss, class_loss, K.sum(ignore_mask)],
+                            message='loss: ')
+    return loss
+
+
+def box_iou(b1, b2):
+    '''Return iou tensor
+    Parameters
+    ----------
+    b1: tensor, shape=(i1,...,iN, 4), xywh
+    b2: tensor, shape=(j, 4), xywh
+    Returns
+    -------
+    iou: tensor, shape=(i1,...,iN, j)
+    '''
+
+    # Expand dim to apply broadcasting.
+    b1 = K.expand_dims(b1, -2)
+    b1_xy = b1[..., :2]
+    b1_wh = b1[..., 2:4]
+    b1_wh_half = b1_wh/2.
+    b1_mins = b1_xy - b1_wh_half
+    b1_maxes = b1_xy + b1_wh_half
+
+    # Expand dim to apply broadcasting.
+    b2 = K.expand_dims(b2, 0)
+    b2_xy = b2[..., :2]
+    b2_wh = b2[..., 2:4]
+    b2_wh_half = b2_wh/2.
+    b2_mins = b2_xy - b2_wh_half
+    b2_maxes = b2_xy + b2_wh_half
+
+    intersect_mins = K.maximum(b1_mins, b2_mins)
+    intersect_maxes = K.minimum(b1_maxes, b2_maxes)
+    intersect_wh = K.maximum(intersect_maxes - intersect_mins, 0.)
+    intersect_area = intersect_wh[..., 0] * intersect_wh[..., 1]
+    b1_area = b1_wh[..., 0] * b1_wh[..., 1]
+    b2_area = b2_wh[..., 0] * b2_wh[..., 1]
+    iou = intersect_area / (b1_area + b2_area - intersect_area)
+    return iou
+
+
+def preprocess_true_boxes(true_box, input_shape, anchors, num_classes):
+    """
+
+    :param true_box:
+    :param input_shape:
+    :param anchors:
+    :param num_classes:
+    :return:
+    """
+    assert (true_box[..., :4] < num_classes).all(), 'class id must be less than num_classes'
+    num_layers = len(anchors) / 3
+
+    anchor_mask = [[6, 7, 8], [3, 4, 5], [0, 1, 2]] if num_layers == 3 else [[3, 4, 5], [1, 2, 3]]
+    true_boxes = np.array(true_box, dtype='float32')
+    input_shape = np.array(input_shape, dtype='int32')
+
+    boxes_xy = (true_boxes[..., 0:2] + true_boxes[..., 3:4])/ 2
+    boxes_wh = true_boxes[..., 2:4] - true_boxes[..., 0:2]
+
+    true_boxes[..., 0:2] = boxes_xy/input_shape[::-1]
+    true_boxes[..., 2:4] = boxes_wh/input_shape[::-1]
+
+    m = true_box.shape[0]
+    grid_shapes = [input_shape / {0: 32, 1: 16, 2: 8} for l in range(num_layers)]
+    y_true = [np.zeros(m, grid_shapes[l][0], grid_shapes[l][1], len(anchor_mask[l]), 5+num_classes, dtype='float32') for l in range(num_layers)]
+
+    anchors = np.expand_dims(anchors, 0)
+    anchor_maxes = anchors / 2
+    anchor_mins = -anchor_maxes
+    valid_mask = boxes_wh[..., 0] > 0
+
+    for b in range(m):
+        wh = boxes_wh[b, valid_mask[b]]
+        if len(wh) == 0:
+            continue
+        wh = np.expand_dims(wh, -2)
+        box_maxes = wh / 2
+        box_mins = -box_maxes
+
+        intersect_mins = np.maximum(box_mins, anchor_mins)
+        intersect_maxes = np.minimum(box_maxes, anchor_maxes)
+
+        intersect_wh = np.maximum(intersect_maxes - intersect_mins, 0.)
+        intersect_area = intersect_wh[..., 0] * intersect_wh[..., 1]
+
+        box_area = wh[..., 0] * wh[..., 1]
+        anchor_area = anchors[..., 0] * anchors[..., 1]
+
+        iou = intersect_area / (box_area + anchor_area - intersect_area)
+
+        best_anchor = np.argmax(iou, axis=-1)
+
+        for t, n in enumerate(best_anchor):
+            for l in range(num_layers):
+                if n in anchor_mask[l]:
+                    i = np.floor(true_boxes[b, t, 0] * grid_shapes[l][1]).astype('int32')
+                    j = np.floor(true_boxes[b, t, 1] * grid_shapes[l][0]).astype('int32')
+                    k = anchor_mask[l].index(n)
+                    c = true_boxes[b, t, 4].astype('int32')
+                    y_true[l][b, j, i, k, 0:4] = true_boxes[b, t, 0:4]
+                    y_true[l][b, j, i, k, 4] = 1
+                    y_true[l][b, j, i, k, 5 + c] = 1
+
+    return y_true
+
+    # grid_shapes = [input_shape]
 
 if __name__ == "__main__":
     # inputs = Input(shape=(416, 416, 3))
@@ -207,14 +363,21 @@ if __name__ == "__main__":
     # grid_shape = K.shape(model.output[0])[1:3]  # height, width
     # print(grid_shape)
 
-    tf_session = K.get_session()
+    # tf_session = K.get_session()
+    #
+    # xx = np.array([0.5, 0.1, 1.0, 0.8])
+    #
+    # mask = xx >= 0.4
+    # print(mask)
+    #
+    # test = np.array([1.0, 2.0, 3.0, 4.0])
+    #
+    # y = tf.boolean_mask(test, xx, axis=0)
+    # print(y.eval(session=tf_session))
 
-    xx = np.array([0.5, 0.1, 1.0, 0.8])
+    input_shape = [416, 416]
+    input_shape = np.array(input_shape)
 
-    mask = xx >= 0.4
-    print(mask)
+    grid_shapes = [input_shape // {0: 32, 1: 16, 2: 8}[l] for l in range(3)]
 
-    test = np.array([1.0, 2.0, 3.0, 4.0])
-
-    y = tf.boolean_mask(test, xx, axis=0)
-    print(y.eval(session=tf_session))
+    print(grid_shapes)
